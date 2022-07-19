@@ -206,6 +206,31 @@ func (c *conn) NoClientAuthCallback(cm gossh.ConnMetadata) (*gossh.Permissions, 
 		c.logf("failed to get conninfo: %v", err)
 		return nil, gossh.ErrDenied
 	}
+	err := c.checkAuth(nil /* no pub key */)
+	c.logf("checkAuth with no pubkey: %v", err)
+	if err != nil {
+		return nil, err
+	}
+
+	// Workaround for buggy SSH clients that assume you must have either a public key or password:
+	// let them use a username with +pass or +password as the suffix and we'll force them to enter
+	// any dummy password.
+	if _, rest, ok := strings.Cut(cm.User(), "+"); ok && rest == "pass" || rest == "password" {
+		return nil, errors.New("any password please") // not visible to users
+	}
+
+	return nil, err
+}
+
+// FakePasswordAuthCallback implements fake password support (any password is
+// accepted) for buggy clients that assume you need a password (if you don't
+// have a public key). These include the iOS Secure Shellfish and iTerminal apps
+// as of 2022-07-19.
+func (c *conn) FakePasswordAuthCallback(cm gossh.ConnMetadata, pass []byte) (*gossh.Permissions, error) {
+	if err := c.setInfo(cm); err != nil {
+		c.logf("failed to get conninfo for fake password: %v", err)
+		return nil, gossh.ErrDenied
+	}
 	return nil, c.checkAuth(nil /* no pub key */)
 }
 
@@ -261,6 +286,7 @@ func (c *conn) ServerConfig(ctx ssh.Context) *gossh.ServerConfig {
 		ImplictAuthMethod:    "tailscale",
 		NoClientAuth:         true, // required for the NoClientAuthCallback to run
 		NoClientAuthCallback: c.NoClientAuthCallback,
+		PasswordCallback:     c.FakePasswordAuthCallback,
 	}
 }
 
@@ -399,8 +425,11 @@ func toIPPort(a net.Addr) (ipp netaddr.IPPort) {
 // connInfo returns a populated sshConnInfo from the provided arguments,
 // validating only that they represent a known Tailscale identity.
 func (c *conn) setInfo(cm gossh.ConnMetadata) error {
+	user := cm.User()
+	user = strings.TrimSuffix(user, "+pass")
+	user = strings.TrimSuffix(user, "+password")
 	ci := &sshConnInfo{
-		sshUser: cm.User(),
+		sshUser: user,
 		src:     toIPPort(cm.RemoteAddr()),
 		dst:     toIPPort(cm.LocalAddr()),
 	}
@@ -418,7 +447,7 @@ func (c *conn) setInfo(cm gossh.ConnMetadata) error {
 	ci.uprof = &uprof
 
 	c.info = ci
-	c.logf("handling conn: %v", ci.String())
+	c.logf("handling conn: %v (client=%q)", cm.ClientVersion())
 	return nil
 }
 
