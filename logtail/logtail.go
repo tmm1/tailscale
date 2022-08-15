@@ -494,19 +494,21 @@ func (l *Logger) encodeText(buf []byte, skipClientTime bool, procID uint32, proc
 	overhead += 12
 
 	// Put a sanity cap on buf's size.
-	max := 16 << 10
-	if l.lowMem {
-		max = 255
-	}
 	var nTruncated int
-	if len(buf) > max {
-		nTruncated = len(buf) - max
-		// TODO: this can break a UTF-8 character
-		// mid-encoding.  We don't tend to log
-		// non-ASCII stuff ourselves, but e.g. client
-		// names might be.
-		buf = buf[:max]
-	}
+	/*
+		max := 16 << 10
+		if l.lowMem {
+			max = 255
+		}
+		if len(buf) > max {
+			nTruncated = len(buf) - max
+			// TODO: this can break a UTF-8 character
+			// mid-encoding.  We don't tend to log
+			// non-ASCII stuff ourselves, but e.g. client
+			// names might be.
+			buf = buf[:max]
+		}
+	*/
 
 	b := make([]byte, 0, len(buf)+overhead)
 	b = append(b, '{')

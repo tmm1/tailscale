@@ -560,7 +560,7 @@ func (ns *Impl) shouldProcessInbound(p *packet.Parsed, t *tstun.Wrapper) bool {
 		// netstack isn't used at all; don't even do an isLocalIP lookup.
 		return false
 	}
-	isLocal := ns.isLocalIP(p.Dst.Addr())
+	isLocal := ns.isLocalIP(p.Dst.Addr()) // INTERESTING
 	if ns.ProcessLocalIPs && isLocal {
 		return true
 	}

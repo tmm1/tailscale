@@ -166,6 +166,9 @@ type Wrapper struct {
 
 	// disableTSMPRejected disables TSMP rejected responses. For tests.
 	disableTSMPRejected bool
+
+	statsEnabled atomic.Uint32
+	stats        statistics
 }
 
 // tunReadResult is the result of a TUN read, or an injected result pretending to be a TUN read.
@@ -556,10 +559,14 @@ func (t *Wrapper) Read(buf []byte, offset int) (int, error) {
 		if response != filter.Accept {
 			metricPacketOutDrop.Add(1)
 			// WireGuard considers read errors fatal; pretend nothing was read
+			// TODO: Record the number of dropped packets.
 			return 0, nil
 		}
 	}
 
+	if t.statsEnabled.Load() > 0 {
+		t.stats.UpdateTx(buf[offset:][:n])
+	}
 	t.noteActivity()
 	return n, nil
 }
@@ -681,6 +688,7 @@ func (t *Wrapper) Write(buf []byte, offset int) (int, error) {
 			//     device/receive.go: _, err = device.tun.device.Write(....)
 			//
 			// TODO(bradfitz): fix upstream interface docs, implementation.
+			// TODO: Record the number of dropped packets.
 			return len(buf), nil
 		}
 	}
@@ -690,6 +698,9 @@ func (t *Wrapper) Write(buf []byte, offset int) (int, error) {
 }
 
 func (t *Wrapper) tdevWrite(buf []byte, offset int) (int, error) {
+	if t.statsEnabled.Load() > 0 {
+		t.stats.UpdateRx(buf[offset:])
+	}
 	if t.isTAP {
 		return t.tapWrite(buf, offset)
 	}
@@ -827,6 +838,35 @@ func (t *Wrapper) InjectOutboundPacketBuffer(packet *stack.PacketBuffer) error {
 // Unwrap returns the underlying tun.Device.
 func (t *Wrapper) Unwrap() tun.Device {
 	return t.tdev
+}
+
+// EnableStatistics enables statistics gathering of every packet.
+// The memory usage is proportional to the number of unique connections.
+// ExtractStatistics must be periodically called to extract statistics
+// gathers thus far and reset the memory usage.
+func (t *Wrapper) EnableStatistics(enable bool) {
+	if enable {
+		t.stats.Reset()
+		t.statsEnabled.Store(1)
+	} else {
+		t.statsEnabled.Store(0)
+		t.stats.Reset()
+	}
+}
+
+// ExtractStatistics extracts statistics about every connection
+// since the last time ExtractStatistics was called.
+// It resets all connection counts back to zero.
+//
+// The Connection.Source represents this host,
+// while the Connection.Destination is some external host.
+// Transmission is defined as being in the direction from source to destination,
+// while reception is in the reverse direction.
+func (t *Wrapper) ExtractStatistics() map[Connection]Counts {
+	if t.statsEnabled.Load() == 0 {
+		return nil
+	}
+	return t.stats.Extract()
 }
 
 var (

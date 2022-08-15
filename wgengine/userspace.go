@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	crand "crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,9 +18,12 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"go4.org/mem"
+	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
 	"tailscale.com/control/controlclient"
@@ -456,8 +460,224 @@ func NewUserspaceEngine(logf logger.Logf, conf Config) (_ Engine, reterr error) 
 
 	go e.pollResolver()
 
+	go e.networkLogger(e.tundev, e.logf)
+	// go networkLogger(e.wgdev, e.logf)
+
 	e.logf("Engine created.")
 	return e, nil
+}
+
+func (e *userspaceEngine) networkLogger(tundev *tstun.Wrapper, logf logger.Logf) {
+	tundev.EnableStatistics(true)
+
+	const (
+		coalesceDNS        = false // best-effort replacement of client port with zero
+		coalescePeerAPI    = false // best-effort replacement of client port with zero
+		anonymizeExitAddrs = false
+	)
+
+	type trafficStatistics struct {
+		StartTime time.Time `json:"start"`
+		EndTime   time.Time `json:"end"`
+
+		VirtualTraffic map[tstun.Connection]tstun.Counts `json:"virtualTraffic,omitempty"`
+		SubnetTraffic  map[tstun.Connection]tstun.Counts `json:"subnetTraffic,omitempty"`
+		ExitTraffic    map[tstun.Connection]tstun.Counts `json:"exitTraffic,omitempty"`
+	}
+
+	start := time.Now().UTC()
+	for now := range time.Tick(5 * time.Second) {
+		now = now.UTC()
+
+		// TODO: Is it safe to assume that netMap is immutable?
+		e.mu.Lock()
+		netMap := e.netMap
+		e.mu.Unlock()
+
+		// TODO: This logic is incorrect if there are multiple netmap
+		// updates within a stats window.
+
+		peerPortByTailscaleIP := make(map[netip.Addr]uint16)
+		var subnetRoutes []netip.Prefix
+		processNode := func(node *tailcfg.Node) {
+			var peerPortV4, peerPortV6 uint16
+			if coalescePeerAPI {
+				services := node.Hostinfo.Services()
+				for i := 0; i < services.Len(); i++ {
+					service := services.At(i)
+					switch {
+					case service.Proto == tailcfg.PeerAPI4:
+						peerPortV4 = service.Port
+					case service.Proto == tailcfg.PeerAPI6:
+						peerPortV6 = service.Port
+					}
+				}
+			}
+
+			for _, a := range node.Addresses {
+				switch {
+				case a.Addr().Is4():
+					peerPortByTailscaleIP[a.Addr()] = peerPortV4
+				case a.Addr().Is6():
+					peerPortByTailscaleIP[a.Addr()] = peerPortV6
+				}
+			}
+
+			for _, route := range node.AllowedIPs {
+				switch {
+				case route.IsSingleIP() && tsaddr.PrefixesContainsIP(node.Addresses, route.Addr()):
+					continue // ignore self
+				case route == tsaddr.AllIPv4() || route == tsaddr.AllIPv6():
+					continue // ignore exit
+				default:
+					subnetRoutes = append(subnetRoutes, route)
+				}
+			}
+		}
+		processNode(netMap.SelfNode)
+		for _, peer := range netMap.Peers {
+			processNode(peer)
+		}
+
+		isTailscaleIP := func(a netip.Addr) bool {
+			if a == tsaddr.TailscaleServiceIP() || a == tsaddr.TailscaleServiceIPv6() {
+				return true
+			}
+			_, ok := peerPortByTailscaleIP[a]
+			return ok
+		}
+		withinSubnetRoute := func(a netip.Addr) bool {
+			return tsaddr.PrefixesContainsIP(subnetRoutes, a)
+		}
+
+		anonymizeAddr := func(ip netip.Addr) netip.Addr {
+			switch {
+			case ip.Is4():
+				x := ip.As4()
+				x[len(x)-1] = 0
+				return netip.AddrFrom4(x)
+			case ip.Is6():
+				x := ip.As16()
+				for i := 0; i < 10; i++ {
+					x[len(x)-1-i] = 0
+				}
+				return netip.AddrFrom16(x)
+			default:
+				return ip
+			}
+		}
+
+		stats := trafficStatistics{
+			StartTime: start,
+			EndTime:   now,
+
+			VirtualTraffic: make(map[tstun.Connection]tstun.Counts),
+			SubnetTraffic:  make(map[tstun.Connection]tstun.Counts),
+			ExitTraffic:    make(map[tstun.Connection]tstun.Counts),
+		}
+		for conn, cnts := range tundev.ExtractStatistics() {
+			srcAddr := conn.Source.Addr()
+			dstAddr := conn.Destination.Addr()
+			srcPort := conn.Source.Port()
+			dstPort := conn.Destination.Port()
+
+			if coalesceDNS {
+				switch {
+				case dstPort == 53:
+					conn.Source = netip.AddrPortFrom(srcAddr, 0)
+				case srcPort == 53:
+					conn.Destination = netip.AddrPortFrom(dstAddr, 0)
+				}
+			}
+
+			switch {
+			case isTailscaleIP(srcAddr) && isTailscaleIP(dstAddr):
+				// TODO: Log this at the HTTP layer since it's implemented in tailscaled?
+				if coalescePeerAPI {
+					switch {
+					case peerPortByTailscaleIP[dstAddr] == dstPort:
+						conn.Source = netip.AddrPortFrom(srcAddr, 0)
+					case peerPortByTailscaleIP[srcAddr] == srcPort:
+						conn.Destination = netip.AddrPortFrom(dstAddr, 0)
+					}
+				}
+				stats.VirtualTraffic[conn] = stats.VirtualTraffic[conn].Merge(cnts)
+			case withinSubnetRoute(srcAddr) || withinSubnetRoute(dstAddr):
+				stats.SubnetTraffic[conn] = stats.SubnetTraffic[conn].Merge(cnts)
+			default:
+				if anonymizeExitAddrs {
+					conn.Source = netip.AddrPortFrom(anonymizeAddr(srcAddr), srcPort)
+					conn.Destination = netip.AddrPortFrom(anonymizeAddr(dstAddr), dstPort)
+				}
+				stats.ExitTraffic[conn] = stats.ExitTraffic[conn].Merge(cnts)
+			}
+		}
+
+		b, err := json.Marshal(stats)
+		if err != nil {
+			logf("NETLOG: %v", err)
+		} else {
+			logf("NETLOG: %s", b)
+		}
+
+		start = now
+	}
+}
+
+func getTypeFieldOffset[T any](field string) uintptr {
+	var v T
+	t := reflect.TypeOf(v)
+	sf, ok := t.FieldByName(field)
+	if !ok {
+		panic(t.String() + ": unknown field: " + field)
+	}
+	return sf.Offset
+}
+
+var (
+	devicePeersOffset  = getTypeFieldOffset[device.Device]("peers")
+	peerStatsOffset    = getTypeFieldOffset[device.Peer]("stats")
+	peerRWMutexOffset  = getTypeFieldOffset[device.Peer]("RWMutex")
+	peerEndpointOffset = getTypeFieldOffset[device.Peer]("endpoint")
+)
+
+func networkLoggerOld(wgdev *device.Device, logf logger.Logf) {
+	type peerMapType struct {
+		sync.RWMutex // protects keyMap
+		keyMap       map[device.NoisePublicKey]*device.Peer
+	}
+	type peerStatsType struct {
+		txBytes           uint64 // bytes send to peer (endpoint)
+		rxBytes           uint64 // bytes received from peer
+		lastHandshakeNano int64  // nano seconds since epoch
+	}
+
+	for range time.Tick(time.Second) {
+		func() {
+			logf("DATALOG START")
+			defer logf("DATALOG END")
+
+			peers := (*peerMapType)(unsafe.Add(unsafe.Pointer(wgdev), devicePeersOffset))
+			peers.RLock()
+			defer peers.RUnlock()
+
+			for _, peer := range peers.keyMap {
+				func() {
+					mu := (*sync.RWMutex)(unsafe.Add(unsafe.Pointer(peer), peerRWMutexOffset))
+					mu.RLock()
+					defer mu.RUnlock()
+
+					endpoint := *(*conn.Endpoint)(unsafe.Add(unsafe.Pointer(peer), peerEndpointOffset))
+
+					stats := (*peerStatsType)(unsafe.Add(unsafe.Pointer(peer), peerStatsOffset))
+
+					txBytes := atomic.LoadUint64(&stats.txBytes)
+					rxBytes := atomic.LoadUint64(&stats.rxBytes)
+					logf("%s: tx:%d rx:%d", endpoint.DstToString(), txBytes, rxBytes)
+				}()
+			}
+		}()
+	}
 }
 
 // echoRespondToAll is an inbound post-filter responding to all echo requests.
@@ -830,6 +1050,11 @@ func (e *userspaceEngine) Reconfig(cfg *wgcfg.Config, routerCfg *router.Config, 
 	}
 	if dnsCfg == nil {
 		panic("dnsCfg must not be nil")
+	}
+	// e.logf("CALLED: wgengine.Engine.Reconfig")
+	if false {
+		b, _ := json.Marshal(routerCfg)
+		e.logf("ROUTER_CONFIG: %v", string(b))
 	}
 
 	e.isLocalAddr.Store(tsaddr.NewContainsIPFunc(routerCfg.LocalAddrs))
@@ -1261,9 +1486,11 @@ func (e *userspaceEngine) SetDERPMap(dm *tailcfg.DERPMap) {
 }
 
 func (e *userspaceEngine) SetNetworkMap(nm *netmap.NetworkMap) {
+	// e.logf("CALLED: wgengine.Engine.SetNetworkMap")
 	e.magicConn.SetNetworkMap(nm)
 	e.mu.Lock()
 	e.netMap = nm
+	// TODO: Use slices.Clone.
 	callbacks := make([]NetworkMapCallback, 0, 4)
 	for _, fn := range e.networkMapCallbacks {
 		callbacks = append(callbacks, fn)

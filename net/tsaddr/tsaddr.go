@@ -141,6 +141,7 @@ func Tailscale6to4(ipv6 netip.Addr) (netip.Addr, bool) {
 	return netip.AddrFrom4([4]byte{100, v6[13], v6[14], v6[15]}), true
 }
 
+// TODO: Use must.Get?
 func mustPrefix(v *netip.Prefix, prefix string) {
 	var err error
 	*v, err = netip.ParsePrefix(prefix)
@@ -240,6 +241,7 @@ func PrefixIs6(p netip.Prefix) bool { return p.Addr().Is6() }
 
 // ContainsExitRoutes reports whether rr contains both the IPv4 and
 // IPv6 /0 route.
+// USEFUL
 func ContainsExitRoutes(rr []netip.Prefix) bool {
 	var v4, v6 bool
 	for _, r := range rr {

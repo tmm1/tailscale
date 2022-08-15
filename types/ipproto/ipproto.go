@@ -5,7 +5,11 @@
 // Package ipproto contains IP Protocol constants.
 package ipproto
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+	"strconv"
+)
 
 // Proto is an IP subprotocol as defined by the IANA protocol
 // numbers list
@@ -54,21 +58,63 @@ func (p Proto) String() string {
 		return "Unknown"
 	case Fragment:
 		return "Frag"
-	case ICMPv4:
-		return "ICMPv4"
-	case IGMP:
-		return "IGMP"
-	case ICMPv6:
-		return "ICMPv6"
-	case UDP:
-		return "UDP"
-	case TCP:
-		return "TCP"
-	case SCTP:
-		return "SCTP"
 	case TSMP:
 		return "TSMP"
 	default:
-		return fmt.Sprintf("IPProto-%d", int(p))
+		return string(p.AppendTo(nil))
 	}
+}
+
+func (p Proto) AppendTo(b []byte) []byte {
+	// NOTE: Any human-readable names must be kept unchanged,
+	// otherwise we will be unable to parse older string representations.
+	// This formats a subset of protocols printed by String to be conservative.
+	switch p {
+	case ICMPv4:
+		return append(b, "ICMPv4"...)
+	case IGMP:
+		return append(b, "IGMP"...)
+	case ICMPv6:
+		return append(b, "ICMPv6"...)
+	case UDP:
+		return append(b, "UDP"...)
+	case TCP:
+		return append(b, "TCP"...)
+	case SCTP:
+		return append(b, "SCTP"...)
+	default:
+		return strconv.AppendUint(append(b, "IPProto-"...), uint64(p), 10)
+	}
+}
+
+func (p Proto) MarshalText() ([]byte, error) {
+	return p.AppendTo(nil), nil
+}
+
+func (p *Proto) UnmarshalText(b []byte) error {
+	if bytes.HasPrefix(b, []byte("IPProto-")) {
+		n, err := strconv.ParseUint(string(b[len("IPProto-"):]), 10, 8)
+		if err != nil {
+			return fmt.Errorf("invalid protocol: %s", b)
+		}
+		*p = Proto(n)
+		return nil
+	}
+	switch string(b) {
+	case "ICMPv4":
+		*p = ICMPv4
+	case "IGMP":
+		*p = IGMP
+	case "ICMPv6":
+		*p = ICMPv6
+	case "UDP":
+		*p = UDP
+	case "TCP":
+		*p = TCP
+	case "SCTP":
+		*p = SCTP
+	default:
+		return fmt.Errorf("invalid protocol: %s", b)
+	}
+	return nil
 }

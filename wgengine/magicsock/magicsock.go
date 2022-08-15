@@ -251,8 +251,8 @@ type Conn struct {
 	// pconn4 and pconn6 are the underlying UDP sockets used to
 	// send/receive packets for wireguard and other magicsock
 	// protocols.
-	pconn4 *RebindingUDPConn
-	pconn6 *RebindingUDPConn
+	pconn4 *RebindingUDPConn // TODO
+	pconn6 *RebindingUDPConn // TODO
 
 	// netChecker is the prober that discovers local network
 	// conditions, including the closest DERP relay and NAT mappings.

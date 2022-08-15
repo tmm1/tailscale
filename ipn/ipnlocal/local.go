@@ -6,6 +6,7 @@ package ipnlocal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -606,6 +607,11 @@ func (b *LocalBackend) SetDecompressor(fn func() (controlclient.Decompressor, er
 // setClientStatus is the callback invoked by the control client whenever it posts a new status.
 // Among other things, this is where we update the netmap, packet filters, DNS and DERP maps.
 func (b *LocalBackend) setClientStatus(st controlclient.Status) {
+	if false {
+		b2, _ := json.Marshal(st)
+		b.logf("CONTROL_STATUS: %s", b2)
+	}
+
 	// The following do not depend on any data for which we need to lock b.
 	if st.Err != nil {
 		// TODO(crawshaw): display in the UI.
@@ -3356,6 +3362,8 @@ func (b *LocalBackend) registerIncomingFile(inf *incomingFile, active bool) {
 // peerAPIBase returns the "http://ip:port" URL base to reach peer's peerAPI.
 // It returns the empty string if the peer doesn't support the peerapi
 // or there's no matching address family based on the netmap's own addresses.
+//
+// INTERESTING: tells us the peer API host and port.
 func peerAPIBase(nm *netmap.NetworkMap, peer *tailcfg.Node) string {
 	if nm == nil || peer == nil || !peer.Hostinfo.Valid() {
 		return ""
@@ -3437,6 +3445,7 @@ func (b *LocalBackend) OfferingExitNode() bool {
 	if b.prefs == nil {
 		return false
 	}
+	// TODO: Use tsaddr.ContainsExitRoutes?
 	var def4, def6 bool
 	for _, r := range b.prefs.AdvertiseRoutes {
 		if r.Bits() != 0 {
