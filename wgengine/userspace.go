@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"go4.org/mem"
+	"golang.org/x/sync/singleflight"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
 	"inet.af/netaddr"
@@ -136,6 +137,10 @@ type userspaceEngine struct {
 	networkMapCallbacks map[*someHandle]NetworkMapCallback
 	tsIPByIPPort        map[netaddr.IPPort]netaddr.IP          // allows registration of IP:ports as belonging to a certain Tailscale IP for whois lookups
 	pongCallback        map[[8]byte]func(packet.TSMPPongReply) // for TSMP pong responses
+
+	// this singleflight is used to deduplicate calls to getStatus when we
+	// don't care if the data is perfectly fresh
+	getStatusSf singleflight.Group
 
 	// Lock ordering: magicsock.Conn.mu, wgLock, then mu.
 }
