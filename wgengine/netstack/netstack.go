@@ -677,6 +677,8 @@ func (ns *Impl) injectInbound(p *packet.Parsed, t *tstun.Wrapper) filter.Respons
 	}
 
 	destIP := p.Dst.Addr()
+	ns.logf("[v2] p.IsEchoRequest()=%v ns.ProcessSubnets=%v tsaddr.IsTailscaleIP(%s)=%v",
+		p.IsEchoRequest(), ns.ProcessSubnets, destIP, tsaddr.IsTailscaleIP(destIP))
 	if p.IsEchoRequest() && ns.ProcessSubnets && !tsaddr.IsTailscaleIP(destIP) {
 		ns.logf("[v2] got ICMP echo request to: %s", destIP)
 
