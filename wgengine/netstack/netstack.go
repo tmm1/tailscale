@@ -535,7 +535,7 @@ var viaRange = tsaddr.TailscaleViaRange()
 func (ns *Impl) shouldProcessInbound(p *packet.Parsed, t *tstun.Wrapper) (ret bool) {
 	var reason int
 	defer func() {
-		ns.logf("[v2] shouldProcessInbound(%s) = %v (%d)", p, ret, reason)
+		ns.logf("[v2] ANDREW: shouldProcessInbound(%s) = %v (%d)", p, ret, reason)
 	}()
 
 	// Handle incoming peerapi connections in netstack.
@@ -604,7 +604,7 @@ var isSynology = runtime.GOOS == "linux" && distro.Get() == distro.Synology
 // raw socket APIs instead of ping child processes.
 func (ns *Impl) userPing(dstIP netip.Addr, pingResPkt []byte) {
 	if !userPingSem.TryAcquire() {
-		ns.logf("[v2] skipping userPing since we can't acquire the semaphore")
+		ns.logf("[v2] ANDREW: skipping userPing since we can't acquire the semaphore")
 		return
 	}
 	defer userPingSem.Release()
