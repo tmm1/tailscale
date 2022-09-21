@@ -3082,8 +3082,11 @@ func (b *LocalBackend) ShouldRunSSH() bool { return b.sshAtomicBool.Load() && en
 // by Tailscale.
 func (b *LocalBackend) ShouldHandleViaIP(ip netip.Addr) bool {
 	if f, ok := b.containsViaIPFuncAtomic.LoadOk(); ok {
-		return f(ip)
+		res := f(ip)
+		b.logf("[v2] containsViaIPFuncAtomic(%s) = %v", ip, res)
+		return res
 	}
+	b.logf("[v2] no containsViaIPFuncAtomic for %s", ip)
 	return false
 }
 

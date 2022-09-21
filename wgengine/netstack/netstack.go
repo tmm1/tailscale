@@ -53,7 +53,7 @@ import (
 	"tailscale.com/wgengine/magicsock"
 )
 
-const debugPackets = false
+const debugPackets = true
 
 var debugNetstack = envknob.RegisterBool("TS_DEBUG_NETSTACK")
 
@@ -532,7 +532,12 @@ var viaRange = tsaddr.TailscaleViaRange()
 
 // shouldProcessInbound reports whether an inbound packet (a packet from a
 // WireGuard peer) should be handled by netstack.
-func (ns *Impl) shouldProcessInbound(p *packet.Parsed, t *tstun.Wrapper) bool {
+func (ns *Impl) shouldProcessInbound(p *packet.Parsed, t *tstun.Wrapper) (ret bool) {
+	var reason int
+	defer func() {
+		ns.logf("[v2] shouldProcessInbound(%s) = %v (%d)", p, ret, reason)
+	}()
+
 	// Handle incoming peerapi connections in netstack.
 	if ns.lb != nil && p.IPProto == ipproto.TCP {
 		var peerAPIPort uint16
@@ -546,27 +551,34 @@ func (ns *Impl) shouldProcessInbound(p *packet.Parsed, t *tstun.Wrapper) bool {
 			peerAPIPort = uint16(atomic.LoadUint32(ns.peerAPIPortAtomic(dstIP)))
 		}
 		if p.IPProto == ipproto.TCP && p.Dst.Port() == peerAPIPort {
+			reason = 1
 			return true
 		}
 	}
 	if ns.isInboundTSSH(p) && ns.processSSH() {
+		reason = 2
 		return true
 	}
 	if p.IPVersion == 6 && viaRange.Contains(p.Dst.Addr()) {
+		reason = 3
 		return ns.lb != nil && ns.lb.ShouldHandleViaIP(p.Dst.Addr())
 	}
 	if !ns.ProcessLocalIPs && !ns.ProcessSubnets {
 		// Fast path for common case (e.g. Linux server in TUN mode) where
 		// netstack isn't used at all; don't even do an isLocalIP lookup.
+		reason = 4
 		return false
 	}
 	isLocal := ns.isLocalIP(p.Dst.Addr())
 	if ns.ProcessLocalIPs && isLocal {
+		reason = 5
 		return true
 	}
 	if ns.ProcessSubnets && !isLocal {
+		reason = 6
 		return true
 	}
+	reason = 7
 	return false
 }
 
@@ -592,6 +604,7 @@ var isSynology = runtime.GOOS == "linux" && distro.Get() == distro.Synology
 // raw socket APIs instead of ping child processes.
 func (ns *Impl) userPing(dstIP netip.Addr, pingResPkt []byte) {
 	if !userPingSem.TryAcquire() {
+		ns.logf("[v2] skipping userPing since we can't acquire the semaphore")
 		return
 	}
 	defer userPingSem.Release()
@@ -665,6 +678,8 @@ func (ns *Impl) injectInbound(p *packet.Parsed, t *tstun.Wrapper) filter.Respons
 
 	destIP := p.Dst.Addr()
 	if p.IsEchoRequest() && ns.ProcessSubnets && !tsaddr.IsTailscaleIP(destIP) {
+		ns.logf("[v2] got ICMP echo request to: %s", destIP)
+
 		var pong []byte // the reply to the ping, if our relayed ping works
 		if destIP.Is4() {
 			h := p.ICMP4Header()
