@@ -677,10 +677,15 @@ func (ns *Impl) injectInbound(p *packet.Parsed, t *tstun.Wrapper) filter.Respons
 	}
 
 	destIP := p.Dst.Addr()
-	ns.logf("[v2] p.IsEchoRequest()=%v ns.ProcessSubnets=%v tsaddr.IsTailscaleIP(%s)=%v",
+
+	ns.logf("[v2] ANDREW: p.IsEchoRequest()=%v ns.ProcessSubnets=%v tsaddr.IsTailscaleIP(%s)=%v",
 		p.IsEchoRequest(), ns.ProcessSubnets, destIP, tsaddr.IsTailscaleIP(destIP))
-	if p.IsEchoRequest() && ns.ProcessSubnets && !tsaddr.IsTailscaleIP(destIP) {
-		ns.logf("[v2] got ICMP echo request to: %s", destIP)
+
+	// If this is an echo request and we're a subnet router, handle pings
+	// ourselves instead of forwarding the packet on.
+	pingIP, handlePing := ns.shouldHandlePing(p)
+	if handlePing {
+		ns.logf("[v2] ANDREW: got ICMP echo request to: %s (%s)", destIP, pingIP)
 
 		var pong []byte // the reply to the ping, if our relayed ping works
 		if destIP.Is4() {
@@ -692,7 +697,7 @@ func (ns *Impl) injectInbound(p *packet.Parsed, t *tstun.Wrapper) filter.Respons
 			h.ToResponse()
 			pong = packet.Generate(&h, p.Payload())
 		}
-		go ns.userPing(destIP, pong)
+		go ns.userPing(pingIP, pong)
 		return filter.DropSilently
 	}
 
@@ -719,6 +724,34 @@ func (ns *Impl) injectInbound(p *packet.Parsed, t *tstun.Wrapper) filter.Respons
 	// instead return filter.DropSilently which just quietly stops
 	// processing it in the tstun TUN wrapper.
 	return filter.DropSilently
+}
+
+func (ns *Impl) shouldHandlePing(p *packet.Parsed) (netip.Addr, bool) {
+	if !p.IsEchoRequest() {
+		return netip.Addr{}, false
+	}
+	if !ns.ProcessSubnets {
+		return netip.Addr{}, false
+	}
+
+	destIP := p.Dst.Addr()
+
+	// For non-4via6 addresses, we don't handle pings if they're destined
+	// for a Tailscale IP.
+	if !viaRange.Contains(destIP) {
+		if tsaddr.IsTailscaleIP(destIP) {
+			return netip.Addr{}, false
+		}
+
+		return destIP, true
+	}
+
+	// This is a 4via6 address; translate the destination to an IPv4
+	// address before forwarding it on. Note that despite ICMP4 and ICMP6
+	// being different protocols, this is safe because the 'userPing'
+	// function doesn't care about the input packet.
+	ns.logf("[v2] ANDREW: handling 4via6 ping")
+	return tsaddr.UnmapVia(destIP), true
 }
 
 func netaddrIPFromNetstackIP(s tcpip.Address) netip.Addr {
