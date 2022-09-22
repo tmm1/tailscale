@@ -265,16 +265,26 @@ func (m *Manager) compileConfig(cfg Config) (rcfg resolver.Config, ocfg OSConfig
 	rcfg.Routes = routes
 	ocfg.Nameservers = []netip.Addr{cfg.serviceIP()}
 
-	if m.os.SupportsSplitDNS() {
-		ocfg.MatchDomains = cfg.matchDomains()
-	} else {
+	var bcfg *OSConfig
+	isApple := runtime.GOOS == "darwin" || runtime.GOOS == "ios"
+	if isApple || !m.os.SupportsSplitDNS() {
 		// If the OS can't do native split-dns, read out the underlying
 		// resolver config and blend it into our config.
-		bcfg, err := m.os.GetBaseConfig()
-		if err != nil {
+		g, err := m.os.GetBaseConfig()
+		if err == nil {
+			bcfg = &g
+		} else if isApple && err == ErrGetBaseConfigNotSupported {
+			// This is currently (2022-09-22) expected in certain iOS and macOS
+			// builds.
+		} else {
 			health.SetDNSOSHealth(err)
 			return resolver.Config{}, OSConfig{}, err
 		}
+	}
+
+	if bcfg == nil {
+		ocfg.MatchDomains = cfg.matchDomains()
+	} else {
 		var defaultRoutes []*dnstype.Resolver
 		for _, ip := range bcfg.Nameservers {
 			defaultRoutes = append(defaultRoutes, &dnstype.Resolver{Addr: ip.String()})
